@@ -1,14 +1,11 @@
 """
 Application configuration using Pydantic Settings.
-
-Loads from environment variables and/or .env file.
-Follows 12-factor app methodology — never hardcode secrets.
+Loads from environment variables and .env file.
+Secrets are never logged or exposed via API responses.
 """
-
 from functools import lru_cache
-from typing import Literal
-
-from pydantic import Field, field_validator
+from typing import Optional, Literal
+from pydantic import Field, SecretStr
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -22,73 +19,54 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    # ===== Application Metadata =====
-    APP_NAME: str = "AI Risk Assessment Agent"
-    APP_VERSION: str = "0.1.0"
-    APP_DESCRIPTION: str = (
-        "Enterprise agent for assessing prompt injection, privacy, "
-        "hallucination, drift, and compliance risks in AI systems."
+    # ===== App Metadata =====
+    app_name: str = Field(default="AI Risk Assessment Agent")
+    app_version: str = Field(default="0.6.0")
+    environment: Literal["development", "staging", "production"] = Field(
+        default="development"
     )
+    debug: bool = Field(default=False)
 
-    # ===== Environment =====
-    ENVIRONMENT: Literal["development", "staging", "production"] = "development"
-    DEBUG: bool = False
-    LOG_LEVEL: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "INFO"
-
-    # ===== API Server =====
-    API_HOST: str = "0.0.0.0"
-    API_PORT: int = 8000
-    API_V1_PREFIX: str = "/api/v1"
-
-    # ===== CORS =====
-    # Comma-separated list in .env, e.g. CORS_ORIGINS=http://localhost:8501,https://app.example.com
-    CORS_ORIGINS: list[str] = Field(default_factory=lambda: ["http://localhost:8501"])
+    # ===== API =====
+    api_v1_prefix: str = Field(default="/api/v1")
+    cors_origins: list[str] = Field(default=["*"])
 
     # ===== OpenAI / LLM =====
-    OPENAI_API_KEY: str = Field(..., description="OpenAI API key (required)")
-    OPENAI_MODEL: str = "gpt-4o-mini"
-    OPENAI_TEMPERATURE: float = 0.2
-    OPENAI_MAX_TOKENS: int = 1500
-    OPENAI_TIMEOUT_SECONDS: int = 30
-    OPENAI_MAX_RETRIES: int = 2
+    # SecretStr ensures the key is never accidentally printed/logged.
+    openai_api_key: Optional[SecretStr] = Field(default=None)
+    openai_model: str = Field(default="gpt-4o-mini")
+    openai_temperature: float = Field(default=0.2, ge=0.0, le=2.0)
+    openai_max_tokens: int = Field(default=800, ge=50, le=4000)
+    openai_timeout_seconds: int = Field(default=30, ge=5, le=120)
 
-    # ===== Risk Assessment Tunables =====
-    RISK_SCORE_THRESHOLD_HIGH: float = 0.75
-    RISK_SCORE_THRESHOLD_MEDIUM: float = 0.40
-    MAX_INPUT_CHARS: int = 20_000  # guardrail for intake payloads
+    # ===== Feature Flags =====
+    enable_ai_analysis: bool = Field(default=True)
 
-    # ===== Validators =====
-    @field_validator("CORS_ORIGINS", mode="before")
-    @classmethod
-    def _split_cors(cls, v):
-        """Allow CORS_ORIGINS as comma-separated string in .env."""
-        if isinstance(v, str):
-            return [origin.strip() for origin in v.split(",") if origin.strip()]
-        return v
+    # ===== Logging =====
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR"] = Field(default="INFO")
 
-    @field_validator("OPENAI_TEMPERATURE")
-    @classmethod
-    def _validate_temperature(cls, v: float) -> float:
-        if not 0.0 <= v <= 2.0:
-            raise ValueError("OPENAI_TEMPERATURE must be between 0.0 and 2.0")
-        return v
+    # ===== Helper Properties =====
+    @property
+    def has_openai_key(self) -> bool:
+        """Check if a usable OpenAI key is configured (no secret exposure)."""
+        if self.openai_api_key is None:
+            return False
+        key_value = self.openai_api_key.get_secret_value()
+        return bool(key_value and key_value.strip() and key_value != "your-key-here")
 
     @property
-    def is_production(self) -> bool:
-        return self.ENVIRONMENT == "production"
+    def ai_enabled(self) -> bool:
+        """AI analysis runs only if feature flag is on AND key is present."""
+        return self.enable_ai_analysis and self.has_openai_key
+
+    def get_openai_key(self) -> Optional[str]:
+        """Safe accessor — only used inside services, never returned via API."""
+        if self.openai_api_key is None:
+            return None
+        return self.openai_api_key.get_secret_value()
 
 
 @lru_cache(maxsize=1)
 def get_settings() -> Settings:
-    """
-    Cached settings instance.
-
-    Using lru_cache ensures Settings() is instantiated only once
-    per process — important for performance and consistency.
-    Use FastAPI's Depends(get_settings) to inject into routes.
-    """
+    """Cached settings singleton (avoids re-reading .env per request)."""
     return Settings()
-
-
-# Convenience export — for non-DI usage (scripts, agents)
-settings = get_settings()
